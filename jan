@@ -1,0 +1,143 @@
+import SwiftUI
+import CoreLocation
+import MessageUI
+import AVFoundation
+import UIKit
+
+class VolumeButtonObserver {
+    private var pressCount = 0
+    private let threshold = 4
+    private var lastPressTime: Date?
+    var onThresholdReached: (() -> Void)?
+    
+    init() {
+        let volumeView = MPVolumeView()
+        UIApplication.shared.windows.first?.addSubview(volumeView)
+        NotificationCenter.default.addObserver(self, selector: #selector(volumeButtonPressed), name: NSNotification.Name("AVSystemController_SystemVolumeDidChangeNotification"), object: nil)
+    }
+    
+    @objc private func volumeButtonPressed(notification: NSNotification) {
+        let currentTime = Date()
+        if let lastPressTime = lastPressTime, currentTime.timeIntervalSince(lastPressTime) > 2 {
+            pressCount = 0
+        }
+        pressCount += 1
+        lastPressTime = currentTime
+        
+        if pressCount >= threshold {
+            onThresholdReached?()
+            pressCount = 0
+        }
+    }
+}
+
+struct ContentView: View {
+    @State private var isRecording = false
+    @State private var locationManager = CLLocationManager()
+    @State private var audioRecorder: AVAudioRecorder?
+    @State private var videoCaptureSession = AVCaptureSession()
+    private let volumeObserver = VolumeButtonObserver()
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            VStack {
+                Text("Poznámky") // Falošné rozhranie
+                    .font(.largeTitle)
+                    .foregroundColor(.white)
+                    .padding()
+            }
+        }
+        .onAppear {
+            locationManager.requestWhenInUseAuthorization()
+            setupAudioRecorder()
+            setupVideoCapture()
+            volumeObserver.onThresholdReached = {
+                sendSOSMessage()
+                startAudioRecording()
+                startVideoRecording()
+            }
+        }
+    }
+    
+    func sendSOSMessage() {
+        if MFMessageComposeViewController.canSendText() {
+            let messageVC = MFMessageComposeViewController()
+            messageVC.recipients = ["+421900123456"] // Testovacie číslo
+            messageVC.body = "SOS! Moja poloha: https://maps.google.com/?q=48.1486,17.1077"
+            
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootViewController = windowScene.windows.first?.rootViewController {
+                rootViewController.present(messageVC, animated: true, completion: nil)
+            }
+        }
+    }
+    
+    func setupAudioRecorder() {
+        let audioFilename = FileManager.default.temporaryDirectory.appendingPathComponent("recording.m4a")
+        let settings = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+        
+        do {
+            audioRecorder = try AVAudioRecorder(url: audioFilename, settings: settings)
+            audioRecorder?.prepareToRecord()
+        } catch {
+            print("Failed to set up audio recorder: \(error.localizedDescription)")
+        }
+    }
+    
+    func startAudioRecording() {
+        audioRecorder?.record()
+    }
+    
+    func setupVideoCapture() {
+        if let captureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            do {
+                let input = try AVCaptureDeviceInput(device: captureDevice)
+                if videoCaptureSession.canAddInput(input) {
+                    videoCaptureSession.addInput(input)
+                }
+                
+                let output = AVCaptureMovieFileOutput()
+                if videoCaptureSession.canAddOutput(output) {
+                    videoCaptureSession.addOutput(output)
+                }
+                
+                videoCaptureSession.startRunning()
+            } catch {
+                print("Failed to set up video capture: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    func startVideoRecording() {
+        if let output = videoCaptureSession.outputs.first as? AVCaptureMovieFileOutput {
+            let videoFilename = FileManager.default.temporaryDirectory.appendingPathComponent("video.mov")
+            output.startRecording(to: videoFilename, recordingDelegate: RecordingDelegate())
+        }
+    }
+}
+
+class RecordingDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        if let error = error {
+            print("Video recording error: \(error.localizedDescription)")
+        } else {
+            print("Video saved at \(outputFileURL)")
+        }
+    }
+}
+
+@main
+struct SOSApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
